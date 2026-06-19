@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrustAttend — Secure Attendance &amp; Salary Tool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0F1117; color: #E5E7EB; font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 14px; min-height: 100vh; }
+    input[type="month"]::-webkit-calendar-picker-indicator { filter: invert(0.6); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1A1D27; }
+    ::-webkit-scrollbar-thumb { background: #2E3347; border-radius: 3px; }
+    .hidden { display: none !important; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes slideIn { from { opacity:0; transform:scale(0.95); } to { opacity:1; transform:scale(1); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.5;} }
+    .fade-in { animation: fadeIn 0.2s ease; }
+    .slide-in { animation: slideIn 0.18s ease; }
+    .spinner { display:inline-block; width:16px; height:16px; border:2px solid #ffffff44; border-top-color:#fff; border-radius:50%; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }
+    #toast { position:fixed; bottom:28px; right:28px; z-index:9999; border-radius:10px;
+      padding:12px 20px; font-size:13px; font-weight:600; max-width:340px;
+      box-shadow:0 8px 32px #0006; transition:opacity 0.3s; pointer-events:none; }
+    #global-loader { position:fixed; inset:0; background:#0F1117cc; z-index:8888; display:flex; align-items:center; justify-content:center; }
+    .duty-select { background:#22263A; border:1px solid #2E3347; border-radius:6px; padding:5px 8px; color:#E5E7EB; font-size:12px; font-family:inherit; outline:none; cursor:pointer; }
+    .coord-input { background:#22263A; border:1px solid #2E3347; border-radius:6px; padding:5px 8px; color:#E5E7EB; font-size:12px; width:110px; outline:none; font-family:'JetBrains Mono',monospace; }
+    .coord-input:disabled { opacity:0.35; cursor:not-allowed; }
+    .gps-banner { border-radius:10px; padding:16px 20px; margin-bottom:16px; }
+    .btn-checkin { display:inline-flex; align-items:center; gap:8px; padding:11px 24px; border:none; border-radius:9px; font-size:14px; font-weight:700; cursor:pointer; font-family:inherit; transition:opacity 0.15s; }
+    .btn-checkin:hover { opacity:0.88; }
+    .btn-checkin:disabled { opacity:0.45; cursor:not-allowed; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" class="hidden"></div>
+
+<script>
+'use strict';
+
+// ════════════════════════════════════════════════════════════════
+//  CONFIG — change this to your server URL when deploying
+// ════════════════════════════════════════════════════════════════
+const API_URL = "https://trustattend-api.onrender.com";
+
+// ── Design Tokens ──────────────────────────────────────────────
+const T = {
+  bg:'#0F1117', surface:'#1A1D27', surface2:'#22263A', border:'#2E3347',
+  amber:'#F59E0B', amberDim:'#92610A',
+  emerald:'#10B981', emeraldDim:'#064E35',
+  rose:'#F43F5E', roseDim:'#5C1426',
+  blue:'#3B82F6', blueDim:'#1E3A5F',
+  violet:'#8B5CF6', violetDim:'#4C1D95',
+  cyan:'#06B6D4', cyanDim:'#164E63',
+  muted:'#6B7280', text:'#E5E7EB', textDim:'#9CA3AF',
+};
+
+// ════════════════════════════════════════════════════════════════
+//  API CLIENT
+// ════════════════════════════════════════════════════════════════
+let AUTH_TOKEN = sessionStorage.getItem('ta_token') || null;
+
+async function api(method, path, body = null, requiresAuth = true) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (requiresAuth && AUTH_TOKEN) headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+  const opts = { method, headers };
+  if (body) opts.body = JSON.stringify(body);
+  try {
+    const res = await fetch(API_URL + path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      AUTH_TOKEN = null;
+      sessionStorage.removeItem('ta_token');
+      sessionStorage.removeItem('ta_user');
+      SESSION = null;
+      render();
+      showToast('Session expired. Please login again.', 'error');
+      return null;
+    }
+    if (!res.ok) {
+      const msg = data.detail || data.message || 'Server error';
+      throw new Error(Array.isArray(msg) ? msg.map(e => e.msg).join(', ') : msg);
+    }
+    return data;
+  } catch (e) {
+    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+      showToast('Cannot reach server. Is the backend running?', 'error');
+      return null;
+    }
+    throw e;
+  }
+}
+
+const GET         = (path)        => api('GET',    path);
+const POST        = (path, body)  => api('POST',   path, body);
+const PUT         = (path, body)  => api('PUT',    path, body);
+const DELETE      = (path)        => api('DELETE', path);
+const POST_PUBLIC = (path, body)  => api('POST', path, body, false);
+
+// ════════════════════════════════════════════════════════════════
+//  APP STATE
+// ════════════════════════════════════════════════════════════════
+let SESSION        = null;
+let CURRENT_TAB    = 'today';
+let SELECTED_MONTH = (() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0'); })();
+let SHOW_CANDIDATE = false;
+let INTEGRITY_DATA = null;
+
+let DATA = {
+  employees:  [],
+  attendance: [],
+  todayRecs:  [],
+  salary:     [],
+  audit:      [],
+  requests:   [],
+  myProfile:  null,
+};
+
+// ════════════════════════════════════════════════════════════════
+//  HELPERS
+// ════════════════════════════════════════════════════════════════
+function todayISO() { return new Date().toISOString().split('T')[0]; }
+
+function badge(label, color, bg) {
+  return '<span style="display:inline-block;padding:2px 10px;border-radius:99px;font-size:11px;font-weight:700;letter-spacing:0.05em;color:'+color+';background:'+bg+'">'+label+'</span>';
+}
+
+function statusBadge(status) {
+  const map = {
+    PRESENT:    {l:'Present',   c:T.emerald,  b:T.emeraldDim+'55'},
+    ABSENT_PL:  {l:'PL',        c:'#A78BFA',  b:'#4C1D9555'},
+    ABSENT_EL:  {l:'EL',        c:T.blue,     b:T.blueDim+'55'},
+    ABSENT_LOP: {l:'LOP',       c:T.rose,     b:T.roseDim+'55'},
+    TRAVEL:     {l:'✈ Travel',  c:T.cyan,     b:T.cyanDim+'55'},
+  };
+  const s = map[status] || {l:status, c:T.muted, b:T.border};
+  return badge(s.l, s.c, s.b);
+}
+
+function dutyBadge(duty) {
+  const map = {
+    OFFICE:  {l:'🏢 Office',   c:T.muted,    b:T.border},
+    ON_SITE: {l:'📍 On-Site',  c:T.emerald,  b:T.emeraldDim+'55'},
+    TRAVEL:  {l:'✈ Traveling', c:T.cyan,     b:T.cyanDim+'55'},
+  };
+  const d = map[duty] || {l:duty, c:T.muted, b:T.border};
+  return badge(d.l, d.c, d.b);
+}
+
+function IS(extra) {
+  return 'background:'+T.surface2+';border:1px solid '+T.border+';border-radius:8px;padding:9px 14px;color:'+T.text+';font-size:14px;width:100%;outline:none;font-family:inherit;'+(extra||'');
+}
+
+let toastTimer = null;
+function showToast(msg, type='success') {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.background = type==='error' ? T.roseDim : (type==='info' ? T.blueDim : T.emeraldDim);
+  el.style.border = '1px solid '+(type==='error' ? T.rose : (type==='info' ? T.blue : T.emerald));
+  el.style.color = type==='error' ? '#FCA5A5' : (type==='info' ? '#93C5FD' : '#6EE7B7');
+  el.classList.remove('hidden');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 5000);
+}
+
+function showLoader() {
+  let el = document.getElementById('global-loader');
+  if (!el) {
+    el = document.createElement('div'); el.id='global-loader';
+    el.innerHTML='<div style="text-align:center;"><div class="spinner" style="width:40px;height:40px;border-width:4px;"></div><div style="color:'+T.muted+';font-size:13px;margin-top:12px;">Loading...</div></div>';
+    document.body.appendChild(el);
+  }
+  el.classList.remove('hidden');
+}
+function hideLoader() { const el=document.getElementById('global-loader'); if(el) el.classList.add('hidden'); }
+
+function statCard(label, value, sub, accent) {
+  return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:18px 22px;border-top:3px solid '+accent+';">'+
+  '<div style="font-size:11px;color:'+T.muted+';font-weight:600;letter-spacing:0.07em;text-transform:uppercase;margin-bottom:6px;">'+label+'</div>'+
+  '<div style="font-size:28px;font-weight:800;color:'+T.text+';line-height:1;">'+value+'</div>'+
+  '<div style="font-size:12px;color:'+T.textDim+';margin-top:4px;">'+sub+'</div></div>';
+}
+
+// ════════════════════════════════════════════════════════════════
+//  RENDER ENGINE
+// ════════════════════════════════════════════════════════════════
+async function render() {
+  const app = document.getElementById('app');
+  if (!SESSION) {
+    if (SHOW_CANDIDATE) { app.innerHTML = renderCandidateForm(); bindCandidateEvents(); }
+    else { app.innerHTML = renderLogin(); bindLoginEvents(); }
+    return;
+  }
+  showLoader();
+  try { await loadDataForTab(); } catch(e) { console.error(e); }
+  hideLoader();
+
+  const role = SESSION.role;
+  let dashHtml = '';
+  if (role === 'admin')    dashHtml = renderAdminDashboard();
+  else if (role === 'manager') dashHtml = renderManagerDashboard();
+  else                     dashHtml = renderEmployeeDashboard();
+
+  app.innerHTML = renderNavBar() + dashHtml;
+  bindAppEvents();
+}
+
+async function loadDataForTab() {
+  const role = SESSION.role;
+
+  if (role === 'admin') {
+    const [emps, today, reqs] = await Promise.all([
+      GET('/employees'),
+      GET('/attendance/today'),
+      CURRENT_TAB === 'requests' ? GET('/candidates') : Promise.resolve(DATA.requests),
+    ]);
+    if (emps)  DATA.employees = emps;
+    if (today) DATA.todayRecs = today;
+    if (reqs)  DATA.requests  = reqs;
+    if (CURRENT_TAB === 'history' || CURRENT_TAB === 'salary') {
+      const [att, sal] = await Promise.all([
+        GET('/attendance?month=' + SELECTED_MONTH),
+        GET('/salary?month=' + SELECTED_MONTH),
+      ]);
+      if (att) DATA.attendance = att;
+      if (sal) DATA.salary     = sal;
+    }
+    if (CURRENT_TAB === 'audit') {
+      const logs = await GET('/audit');
+      if (logs) DATA.audit = logs;
+    }
+
+  } else if (role === 'manager') {
+    const [emps, today] = await Promise.all([
+      GET('/employees'),
+      GET('/attendance/today'),
+    ]);
+    if (emps)  DATA.employees = emps;
+    if (today) DATA.todayRecs = today;
+    if (CURRENT_TAB === 'audit') {
+      const logs = await GET('/audit');
+      if (logs) DATA.audit = logs;
+    }
+    if (CURRENT_TAB === 'integrity') {
+      // handled by button
+    }
+
+  } else {
+    // employee
+    const [emp, att, sal] = await Promise.all([
+      GET('/employees/' + SESSION.employee_id),
+      GET('/attendance?month=' + SELECTED_MONTH),
+      GET('/salary?month=' + SELECTED_MONTH),
+    ]);
+    if (emp) DATA.myProfile  = emp;
+    if (att) DATA.attendance = att;
+    if (sal) DATA.salary     = sal;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  LOGIN PAGE
+// ════════════════════════════════════════════════════════════════
+function renderLogin() {
+  return '<div style="min-height:100vh;background:'+T.bg+';display:flex;align-items:center;justify-content:center;padding:20px;">'+
+  '<div class="slide-in" style="width:100%;max-width:420px;">'+
+  '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:16px;padding:40px;box-shadow:0 32px 80px #0009;margin-bottom:16px;">'+
+  '<div style="text-align:center;margin-bottom:32px;">'+
+  '<div style="display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;background:'+T.amberDim+'55;border-radius:14px;border:1px solid '+T.amber+'44;margin-bottom:16px;">'+
+  '<svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7L12 2z" fill="'+T.amber+'"/><path d="M9 12l2 2 4-4" stroke="#000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>'+
+  '<div style="font-size:22px;font-weight:800;">TrustAttend</div>'+
+  '<div style="color:'+T.muted+';font-size:13px;margin-top:4px;">Secure &middot; Tamper-Proof &middot; Multi-Role</div></div>'+
+  '<div style="margin-bottom:16px;"><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:6px;">Username</label>'+
+  '<input id="inp-user" placeholder="Enter your username" autofocus style="'+IS()+'"></div>'+
+  '<div style="margin-bottom:20px;"><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:6px;">Password</label>'+
+  '<input id="inp-pass" type="password" placeholder="Enter your password" style="'+IS()+'"></div>'+
+  '<div id="login-error" class="hidden" style="padding:10px 14px;border-radius:8px;margin-bottom:16px;background:'+T.roseDim+'66;border:1px solid '+T.rose+';color:#FCA5A5;font-size:13px;"></div>'+
+  '<button id="btn-login" style="display:flex;align-items:center;justify-content:center;width:100%;padding:11px 0;border:none;border-radius:8px;background:'+T.amber+';color:#000;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Sign In</button>'+
+  '</div>'+
+  '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:18px 24px;text-align:center;">'+
+  '<div style="font-size:12px;color:'+T.muted+';margin-bottom:10px;">New employee? Submit an account request here</div>'+
+  '<button id="btn-new-candidate" style="display:inline-flex;align-items:center;gap:8px;padding:10px 24px;border-radius:8px;border:1px solid '+T.amber+'55;background:'+T.amberDim+'33;color:'+T.amber+';font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">+ New Candidate — Account Request</button></div>'+
+  '</div></div>';
+}
+
+function bindLoginEvents() {
+  document.getElementById('btn-login').onclick = doLogin;
+  document.getElementById('inp-pass').onkeydown = e => { if(e.key==='Enter') doLogin(); };
+  document.getElementById('inp-user').onkeydown = e => { if(e.key==='Enter') doLogin(); };
+  document.getElementById('btn-new-candidate').onclick = () => { SHOW_CANDIDATE=true; render(); };
+}
+
+async function doLogin() {
+  const username = document.getElementById('inp-user').value.trim();
+  const password = document.getElementById('inp-pass').value;
+  const btn = document.getElementById('btn-login');
+  const errEl = document.getElementById('login-error');
+  if (!username || !password) { errEl.textContent='Username and password are required.'; errEl.classList.remove('hidden'); return; }
+
+  btn.innerHTML = '<span class="spinner"></span> Authenticating...'; btn.disabled = true;
+  errEl.classList.add('hidden');
+
+  try {
+    const data = await api('POST', '/auth/login', { username, password }, false);
+    if (!data) { btn.innerHTML='Sign In'; btn.disabled=false; return; }
+
+    AUTH_TOKEN = data.token;
+    sessionStorage.setItem('ta_token', AUTH_TOKEN);
+    SESSION = data.user;
+    sessionStorage.setItem('ta_user', JSON.stringify(SESSION));
+    CURRENT_TAB = 'today';
+    INTEGRITY_DATA = null;
+    SHOW_CANDIDATE = false;
+    await render();
+  } catch(e) {
+    errEl.textContent = e.message || 'Invalid credentials.';
+    errEl.classList.remove('hidden');
+    btn.innerHTML='Sign In'; btn.disabled=false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  CANDIDATE FORM
+// ════════════════════════════════════════════════════════════════
+function renderCandidateForm() {
+  return '<div style="min-height:100vh;background:'+T.bg+';display:flex;align-items:flex-start;justify-content:center;padding:40px 20px;">'+
+  '<div class="slide-in" style="width:100%;max-width:500px;">'+
+  '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:16px;padding:36px;box-shadow:0 32px 80px #0009;">'+
+  '<div style="display:flex;align-items:center;gap:12px;margin-bottom:28px;">'+
+  '<button id="btn-back-login" style="background:'+T.surface2+';border:1px solid '+T.border+';border-radius:8px;padding:6px 12px;color:'+T.textDim+';font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">&#8592; Back</button>'+
+  '<div><div style="font-size:18px;font-weight:800;">New Candidate Registration</div>'+
+  '<div style="font-size:12px;color:'+T.muted+';margin-top:2px;">HR will approve — then you will get login details</div></div></div>'+
+  '<div style="display:grid;gap:14px;">'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Full Name *</label><input id="c-name" placeholder="e.g. Rahul Sharma" style="'+IS()+'"></div>'+
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Email *</label><input id="c-email" type="email" placeholder="rahul@company.com" style="'+IS()+'"></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Phone *</label><input id="c-phone" placeholder="9876543210" style="'+IS()+'"></div></div>'+
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Department *</label>'+
+  '<select id="c-dept" style="'+IS()+'"><option value="">Select</option><option>Engineering</option><option>Marketing</option><option>Finance</option><option>HR</option><option>Operations</option><option>Sales</option></select></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Position *</label><input id="c-position" placeholder="Software Engineer" style="'+IS()+'"></div></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Joining Date *</label><input id="c-join" type="date" value="'+todayISO()+'" style="'+IS()+'"></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Address</label><input id="c-address" placeholder="Your address" style="'+IS()+'"></div></div>'+
+  '<div id="c-error" class="hidden" style="margin-top:14px;padding:10px 14px;border-radius:8px;background:'+T.roseDim+'66;border:1px solid '+T.rose+';color:#FCA5A5;font-size:13px;"></div>'+
+  '<button id="btn-submit-candidate" style="margin-top:20px;display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:12px 0;border:none;border-radius:8px;background:'+T.amber+';color:#000;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">&#128233; Submit Request</button>'+
+  '<div style="margin-top:14px;padding:12px 14px;background:'+T.surface2+';border-radius:8px;font-size:12px;color:'+T.muted+';text-align:center;">&#8505;&#65039; Your request will go to HR Admin. After approval you will receive temporary login details.</div>'+
+  '</div></div></div>';
+}
+
+function bindCandidateEvents() {
+  document.getElementById('btn-back-login').onclick = () => { SHOW_CANDIDATE=false; render(); };
+  document.getElementById('btn-submit-candidate').onclick = async () => {
+    const name=document.getElementById('c-name').value.trim(), email=document.getElementById('c-email').value.trim(),
+          phone=document.getElementById('c-phone').value.trim(), dept=document.getElementById('c-dept').value,
+          position=document.getElementById('c-position').value.trim(), join=document.getElementById('c-join').value,
+          address=document.getElementById('c-address').value.trim();
+    const errEl=document.getElementById('c-error'), btn=document.getElementById('btn-submit-candidate');
+    if (!name||!email||!phone||!dept||!position||!join) { errEl.textContent='Please fill all required (*) fields.'; errEl.classList.remove('hidden'); return; }
+    errEl.classList.add('hidden'); btn.innerHTML='<span class="spinner"></span> Submitting...'; btn.disabled=true;
+    try {
+      await POST_PUBLIC('/candidates', { name, email, phone, department:dept, position, join_date:join, address });
+      document.getElementById('app').innerHTML = '<div style="min-height:100vh;background:'+T.bg+';display:flex;align-items:center;justify-content:center;padding:20px;">'+
+      '<div class="slide-in" style="text-align:center;max-width:420px;">'+
+      '<div style="font-size:64px;margin-bottom:20px;">&#9989;</div>'+
+      '<div style="font-size:22px;font-weight:800;margin-bottom:10px;">Request Submitted!</div>'+
+      '<div style="color:'+T.muted+';font-size:14px;margin-bottom:24px;">Your request has reached HR Admin.<br>After approval you will receive temporary login details.</div>'+
+      '<button id="btn-back-home" style="padding:11px 28px;border-radius:8px;border:none;background:'+T.amber+';color:#000;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Go to Login Page</button></div></div>';
+      document.getElementById('btn-back-home').onclick = () => { SHOW_CANDIDATE=false; render(); };
+    } catch(e) { errEl.textContent=e.message||'Could not submit. Please try again.'; errEl.classList.remove('hidden'); btn.innerHTML='&#128233; Submit Request'; btn.disabled=false; }
+  };
+}
+
+// ════════════════════════════════════════════════════════════════
+//  NAV BAR
+// ════════════════════════════════════════════════════════════════
+function renderNavBar() {
+  const empId = SESSION.employee_id ? ' &middot; '+SESSION.employee_id : '';
+  const roleColors = { admin: T.amber, manager: T.violet, employee: T.emerald };
+  const roleLabel = {
+    admin:    'Administrator',
+    manager:  'Technical Manager',
+    employee: 'Employee'+empId,
+  }[SESSION.role] || SESSION.role;
+  const roleColor = roleColors[SESSION.role] || T.muted;
+
+  return '<nav style="display:flex;align-items:center;justify-content:space-between;padding:0 32px;height:56px;background:'+T.surface+';border-bottom:1px solid '+T.border+';position:sticky;top:0;z-index:100;">'+
+  '<div style="display:flex;align-items:center;gap:12px;">'+
+  '<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7L12 2z" fill="'+T.amber+'" opacity="0.9"/><path d="M9 12l2 2 4-4" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'+
+  '<span style="font-weight:700;font-size:15px;letter-spacing:-0.01em;">TrustAttend</span>'+badge('LIVE',T.emerald,T.emeraldDim+'44')+'</div>'+
+  '<div style="display:flex;align-items:center;gap:16px;">'+
+  '<div style="text-align:right;"><div style="font-size:13px;font-weight:600;">'+SESSION.name+'</div>'+
+  '<div style="font-size:11px;color:'+roleColor+';font-weight:600;">'+roleLabel+'</div></div>'+
+  '<button id="btn-logout" style="display:inline-flex;align-items:center;padding:6px 14px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.textDim+';font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Sign out</button>'+
+  '</div></nav>';
+}
+
+// ════════════════════════════════════════════════════════════════
+//  ADMIN DASHBOARD
+// ════════════════════════════════════════════════════════════════
+function renderAdminDashboard() {
+  const employees = DATA.employees;
+  const todayRecs = DATA.todayRecs;
+  const markedIds = new Set(todayRecs.map(r=>r.employee_id));
+  const today     = todayISO();
+  const pendingReqs = DATA.requests.filter(r=>r.status==='pending');
+  const tampered  = INTEGRITY_DATA ? INTEGRITY_DATA.filter(r=>r.tampered) : [];
+
+  const tabs = [
+    {k:'today',     l:'&#128197; Today'},
+    {k:'history',   l:'&#128203; History'},
+    {k:'salary',    l:'&#128176; Salary'},
+    {k:'employees', l:'&#128101; Employees'},
+    {k:'requests',  l:'&#128233; Requests'+(pendingReqs.length?'&nbsp;<span style="background:'+T.rose+';color:#fff;border-radius:99px;padding:0 6px;font-size:10px;">'+pendingReqs.length+'</span>':'')},
+    {k:'audit',     l:'&#128272; Audit Log'},
+    {k:'integrity', l:'&#128737; Integrity'},
+  ];
+
+  let html = '<div style="max-width:1100px;margin:0 auto;padding:28px 24px;" class="fade-in">';
+  if (tampered.length) {
+    html += '<div style="background:#7F1D1D;border:1px solid #EF4444;border-radius:10px;padding:14px 20px;margin-bottom:20px;display:flex;align-items:flex-start;gap:14px;"><span style="font-size:22px;">&#128680;</span><div><div style="font-weight:800;font-size:14px;color:#FCA5A5;">DATA INTEGRITY VIOLATION DETECTED</div><div style="font-size:12px;color:#FCA5A5;opacity:0.85;margin-top:3px;">'+tampered.length+' record(s) failed SHA-256 check.</div></div></div>';
+  }
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">'+
+  '<div><h1 style="font-size:22px;font-weight:800;">HR Admin Dashboard</h1>'+
+  '<div style="color:'+T.muted+';font-size:13px;margin-top:3px;">Server date: <strong style="color:'+T.amber+';">'+today+'</strong> &nbsp;&middot;&nbsp; '+employees.length+' employees</div></div>'+
+  '<button id="btn-integrity" style="display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.text+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">&#128269; Verify Integrity</button></div>';
+
+  // Stat cards — office employees only for "today" count
+  const officeEmps = employees.filter(e=>(e.duty_type||'OFFICE')==='OFFICE');
+  html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px;">'+
+  statCard('Marked Today', markedIds.size+'/'+employees.length, 'all duty types', T.amber)+
+  statCard('Present / Travel', todayRecs.filter(r=>r.status==='PRESENT'||r.status==='TRAVEL').length, 'on duty', T.emerald)+
+  statCard('Absent Today', todayRecs.filter(r=>r.status.startsWith('ABSENT')).length, 'on leave', T.rose)+
+  statCard('Pending Requests', pendingReqs.length, 'awaiting approval', T.blue)+'</div>';
+
+  html += '<div style="display:flex;gap:4px;margin-bottom:20px;background:'+T.surface+';border-radius:10px;padding:4px;border:1px solid '+T.border+';width:fit-content;flex-wrap:wrap;">'+
+  tabs.map(t=>'<button class="tab-btn" data-tab="'+t.k+'" style="padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;background:'+(CURRENT_TAB===t.k?T.amber:'transparent')+';color:'+(CURRENT_TAB===t.k?'#000':T.muted)+';">'+t.l+'</button>').join('')+'</div>';
+
+  html += '<div id="tab-content">';
+  if      (CURRENT_TAB==='today')     html += renderTodayTab(employees, todayRecs, markedIds, today);
+  else if (CURRENT_TAB==='history')   html += renderHistoryTab();
+  else if (CURRENT_TAB==='salary')    html += renderSalaryTab();
+  else if (CURRENT_TAB==='employees') html += renderEmployeesTab(employees);
+  else if (CURRENT_TAB==='requests')  html += renderRequestsTab();
+  else if (CURRENT_TAB==='audit')     html += renderAuditTab();
+  else if (CURRENT_TAB==='integrity') html += renderIntegrityTab();
+  html += '</div></div>';
+  return html;
+}
+
+// ── Today Tab (Admin) ──────────────────────────────────────────
+function renderTodayTab(employees, todayRecs, markedIds, today) {
+  if (!employees.length) return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:40px;text-align:center;color:'+T.muted+';">No employees found. Approve candidates first.</div>';
+
+  // Separate employees by duty type
+  const officeEmps  = employees.filter(e=>(e.duty_type||'OFFICE')==='OFFICE');
+  const nonOffice   = employees.filter(e=>(e.duty_type||'OFFICE')!=='OFFICE');
+
+  function buildRow(emp) {
+    const rec    = todayRecs.find(r=>r.employee_id===emp.id);
+    const marked = !!rec;
+    const duty   = emp.duty_type || 'OFFICE';
+    const isOffice = duty === 'OFFICE';
+
+    let actionCell = '';
+    if (marked) {
+      actionCell = '<span style="font-size:12px;color:'+T.muted+';">&#128274; Locked &middot; '+rec.marked_at.slice(11,16)+' UTC</span>';
+    } else if (isOffice) {
+      actionCell = '<div style="display:flex;gap:8px;">'+
+        '<button class="btn-present" data-id="'+emp.id+'" data-name="'+emp.name+'" style="padding:6px 14px;border-radius:8px;border:none;background:'+T.emerald+';color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">&#10003; Present</button>'+
+        '<button class="btn-absent" data-id="'+emp.id+'" data-name="'+emp.name+'" style="padding:6px 14px;border-radius:8px;border:none;background:'+T.rose+';color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">&#10007; Absent</button></div>';
+    } else {
+      actionCell = '<span style="font-size:12px;color:'+T.muted+';">Employee self-marks via app</span>';
+    }
+
+    return '<tr style="border-bottom:1px solid '+T.border+';background:'+(marked?T.surface2+'88':'transparent')+'">'+
+    '<td style="padding:12px 12px;"><div style="font-weight:600;">'+emp.name+'</div><div style="font-size:11px;color:'+T.muted+';">'+emp.id+'</div></td>'+
+    '<td style="padding:12px 12px;color:'+T.textDim+';">'+emp.department+'</td>'+
+    '<td style="padding:12px 12px;">'+dutyBadge(duty)+'</td>'+
+    '<td style="padding:12px 12px;">'+(marked?statusBadge(rec.status):'<span style="color:'+T.muted+';font-size:12px;">&#8212; not marked</span>')+'</td>'+
+    '<td style="padding:12px 12px;">'+actionCell+'</td></tr>';
+  }
+
+  let officeRows = officeEmps.map(buildRow).join('');
+  let nonOfficeRows = nonOffice.map(buildRow).join('');
+
+  let html = '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:'+T.amber+';margin-bottom:8px;">Mark Attendance &#8212; '+today+'</div>'+
+  '<div style="padding:10px 14px;background:'+T.amberDim+'22;border-left:3px solid '+T.amber+';border-radius:6px;font-size:12px;color:'+T.textDim+';margin-bottom:16px;">'+
+  '&#9432; Only <strong style="color:'+T.text+';">OFFICE</strong> employees have HR action buttons. ON_SITE &amp; TRAVEL employees self-mark via the employee portal.'+
+  '</div>'+
+  '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr style="border-bottom:1px solid '+T.border+';">'+
+  ['Employee','Dept','Duty Type','Status','Action'].map(h=>'<th style="padding:8px 12px;text-align:left;font-size:11px;color:'+T.muted+';font-weight:700;text-transform:uppercase;">'+h+'</th>').join('')+
+  '</tr></thead><tbody>'+officeRows+nonOfficeRows+'</tbody></table></div></div>';
+
+  return html;
+}
+
+// ── History Tab ─────────────────────────────────────────────────
+function renderHistoryTab() {
+  const monthRecs = DATA.attendance;
+  const employees = DATA.employees;
+  let body = monthRecs.length===0
+    ? '<div style="color:'+T.muted+';text-align:center;padding:32px;">No records for '+SELECTED_MONTH+'</div>'
+    : '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr style="border-bottom:1px solid '+T.border+';">'+
+      ['Date','Employee','Duty','Status','Marked By','Marked At','Hash'].map(h=>'<th style="padding:8px 12px;text-align:left;font-size:11px;color:'+T.muted+';font-weight:700;text-transform:uppercase;">'+h+'</th>').join('')+
+      '</tr></thead><tbody>'+[...monthRecs].reverse().map(rec=>{
+        const emp=employees.find(e=>e.id===rec.employee_id);
+        return '<tr style="border-bottom:1px solid '+T.border+';"><td style="padding:10px 12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;">'+rec.date+'</td>'+
+        '<td style="padding:10px 12px;"><div style="font-weight:600;">'+(emp?.name||rec.employee_id)+'</div><div style="font-size:11px;color:'+T.muted+';">'+rec.employee_id+'</div></td>'+
+        '<td style="padding:10px 12px;">'+(emp?dutyBadge(emp.duty_type||'OFFICE'):'&#8212;')+'</td>'+
+        '<td style="padding:10px 12px;">'+statusBadge(rec.status)+'</td>'+
+        '<td style="padding:10px 12px;color:'+T.textDim+';">'+rec.marked_by+'</td>'+
+        '<td style="padding:10px 12px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:'+T.muted+';">'+rec.marked_at.replace('T',' ').slice(0,19)+' UTC</td>'+
+        '<td style="padding:10px 12px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:'+T.amber+';">'+(rec.hash?.slice(0,16)||'')+'&#8230;</td></tr>';
+      }).join('')+'</tbody></table></div>';
+  return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">'+
+  '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';">Attendance History</div>'+
+  '<input type="month" id="month-picker" value="'+SELECTED_MONTH+'" style="background:'+T.surface2+';border:1px solid '+T.border+';border-radius:8px;padding:6px 12px;color:'+T.text+';font-size:13px;outline:none;font-family:inherit;"></div>'+body+'</div>';
+}
+
+// ── Salary Tab ─────────────────────────────────────────────────
+function renderSalaryTab() {
+  const salaryData = DATA.salary;
+  let cards = salaryData.map(s => {
+    const cols = [
+      {l:'Base Salary',       v:'&#8377;'+s.monthly_salary.toLocaleString(), a:T.amber},
+      {l:'Days in Month',     v:s.days_in_month,  a:T.muted},
+      {l:'Per-Day Rate',      v:'&#8377;'+s.per_day_salary.toLocaleString(), a:T.muted},
+      {l:'Present Days',      v:s.present_days,   a:T.emerald},
+      {l:'Travel Days',       v:(s.travel_days||0), a:T.cyan},
+      {l:'LOP Days',          v:s.lop_days,       a:s.lop_days?T.rose:T.muted},
+    ];
+    return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;margin-bottom:14px;">'+
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;flex-wrap:wrap;gap:12px;">'+
+    '<div><div style="font-weight:700;font-size:15px;">'+s.name+'</div>'+
+    '<div style="font-size:12px;color:'+T.muted+';">'+s.department+' &middot; '+s.employee_id+'</div>'+
+    '<div style="margin-top:6px;">'+dutyBadge(s.duty_type||'OFFICE')+'</div></div>'+
+    '<div style="display:flex;align-items:center;gap:12px;"><div style="text-align:right;">'+
+    '<div style="font-size:22px;font-weight:800;color:'+T.amber+';">&#8377;'+s.payable.toLocaleString()+'</div>'+
+    '<div style="font-size:11px;color:'+T.muted+';">Net Payable</div></div>'+
+    '<button class="btn-edit-emp-salary" data-id="'+s.employee_id+'" style="padding:6px 14px;border-radius:8px;border:1px solid '+T.amber+'55;background:'+T.amberDim+'33;color:'+T.amber+';font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">&#9998; Edit</button></div></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;">'+cols.map(c=>'<div style="background:'+T.surface2+';border-radius:8px;padding:10px 12px;border-top:2px solid '+c.a+';">'+
+    '<div style="font-size:10px;color:'+T.muted+';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">'+c.l+'</div>'+
+    '<div style="font-weight:700;font-size:14px;color:'+c.a+';">'+c.v+'</div></div>').join('')+'</div>'+
+    ((s.travel_days||0)>0?'<div style="margin-top:10px;padding:8px 14px;background:'+T.cyanDim+'33;border-radius:8px;font-size:12px;color:#67E8F9;display:flex;align-items:center;gap:8px;">✈ <span>'+s.travel_days+' travel day'+(s.travel_days>1?'s':'')+' counted as fully paid (no deduction)</span></div>':'')+
+    (s.lop_days>0?'<div style="margin-top:8px;padding:10px 14px;background:'+T.roseDim+'44;border-radius:8px;font-size:12px;color:#FCA5A5;display:flex;justify-content:space-between;"><span>LOP Deduction ('+s.lop_days+' day'+(s.lop_days>1?'s':'')+' &times; &#8377;'+s.per_day_salary+')</span><strong>&#8722;&#8377;'+s.deduction.toLocaleString()+'</strong></div>':'')+
+    '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;"><span style="font-size:12px;color:'+T.muted+';">Remaining:</span>'+badge('PL: '+s.pl_balance,'#A78BFA','#4C1D9555')+badge('EL: '+s.el_balance,T.blue,T.blueDim+'55')+'</div></div>';
+  }).join('');
+
+  return '<div><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">'+
+  '<h2 style="font-size:17px;font-weight:700;">Salary Summary</h2>'+
+  '<input type="month" id="month-picker" value="'+SELECTED_MONTH+'" style="background:'+T.surface2+';border:1px solid '+T.border+';border-radius:8px;padding:6px 12px;color:'+T.text+';font-size:13px;outline:none;font-family:inherit;"></div>'+
+  (cards||'<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:40px;text-align:center;color:'+T.muted+';">No salary data for this month.</div>')+'</div>';
+}
+
+// ── Employees Tab ───────────────────────────────────────────────
+function renderEmployeesTab(employees) {
+  if (!employees.length) return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:40px;text-align:center;color:'+T.muted+';">No employees found.</div>';
+  let rows = employees.map(emp => '<tr style="border-bottom:1px solid '+T.border+'22;">'+
+  '<td style="padding:12px 12px;"><div style="font-weight:600;">'+emp.name+'</div><div style="font-size:11px;color:'+T.muted+';">'+emp.id+' &middot; Joined '+emp.join_date+'</div></td>'+
+  '<td style="padding:12px 12px;color:'+T.textDim+';">'+emp.department+'</td>'+
+  '<td style="padding:12px 12px;">'+dutyBadge(emp.duty_type||'OFFICE')+'</td>'+
+  '<td style="padding:12px 12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;color:'+T.amber+';">&#8377;'+emp.monthly_salary.toLocaleString()+'</td>'+
+  '<td style="padding:12px 12px;">'+badge(emp.pl_balance,'#A78BFA','#4C1D9555')+'</td>'+
+  '<td style="padding:12px 12px;">'+badge(emp.el_balance,T.blue,T.blueDim+'55')+'</td>'+
+  '<td style="padding:12px 12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;color:'+T.emerald+';">'+(emp.username||'&#8212;')+'</td>'+
+  '<td style="padding:12px 12px;"><div style="display:flex;gap:6px;">'+
+  '<button class="btn-edit-emp" data-id="'+emp.id+'" style="padding:5px 12px;border-radius:7px;border:1px solid '+T.amber+'55;background:'+T.amberDim+'33;color:'+T.amber+';font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">&#9998; Edit</button>'+
+  '<button class="btn-delete-emp" data-id="'+emp.id+'" data-name="'+emp.name+'" style="padding:5px 12px;border-radius:7px;border:1px solid '+T.rose+'55;background:'+T.roseDim+'33;color:'+T.rose+';font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;">&#128465; Delete</button>'+
+  '</div></td></tr>').join('');
+  return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';margin-bottom:16px;">&#128101; Employee Management</div>'+
+  '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr style="border-bottom:1px solid '+T.border+';">'+
+  ['Employee','Department','Duty','Salary/Month','PL','EL','Username','Actions'].map(h=>'<th style="padding:8px 12px;text-align:left;font-size:11px;color:'+T.muted+';font-weight:700;text-transform:uppercase;">'+h+'</th>').join('')+
+  '</tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+}
+
+// ── Requests Tab ────────────────────────────────────────────────
+function renderRequestsTab() {
+  const pending=DATA.requests.filter(r=>r.status==='pending');
+  const approved=DATA.requests.filter(r=>r.status==='approved');
+  const rejected=DATA.requests.filter(r=>r.status==='rejected');
+  let html='';
+  if (!DATA.requests.length) return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:40px;text-align:center;color:'+T.muted+';">&#128237; No requests yet.</div>';
+  if (pending.length) {
+    html += '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;margin-bottom:20px;">'+
+    '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';margin-bottom:16px;">&#8987; Pending ('+pending.length+')</div>'+
+    pending.map(req=>'<div style="border:1px solid '+T.border+';border-radius:10px;padding:16px 20px;margin-bottom:12px;background:'+T.surface2+';">'+
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">'+
+    '<div><div style="font-weight:700;font-size:15px;">'+req.name+'</div>'+
+    '<div style="font-size:12px;color:'+T.muted+';margin-top:3px;">'+req.department+' &middot; '+req.position+' &middot; Joining: '+req.join_date+'</div>'+
+    '<div style="font-size:12px;color:'+T.textDim+';margin-top:2px;">&#128231; '+req.email+' &nbsp; &#128241; '+req.phone+'</div>'+
+    (req.address?'<div style="font-size:11px;color:'+T.muted+';margin-top:2px;">&#128205; '+req.address+'</div>':'')+
+    '<div style="font-size:10px;color:'+T.muted+';margin-top:4px;">Submitted: '+req.submitted_at.replace('T',' ').slice(0,19)+'</div></div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+
+    '<button class="btn-approve-req" data-id="'+req.id+'" style="padding:8px 20px;border-radius:8px;border:none;background:'+T.emerald+';color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;">&#10003; Approve</button>'+
+    '<button class="btn-reject-req" data-id="'+req.id+'" style="padding:8px 16px;border-radius:8px;border:1px solid '+T.rose+'55;background:'+T.roseDim+'33;color:'+T.rose+';font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;">&#10007; Reject</button>'+
+    '</div></div></div>').join('')+'</div>';
+  }
+  if (approved.length) {
+    html += '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;margin-bottom:20px;">'+
+    '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.emerald+';margin-bottom:16px;">&#9989; Approved ('+approved.length+')</div>'+
+    approved.map(req=>'<div style="border:1px solid '+T.emeraldDim+';border-radius:10px;padding:14px 18px;margin-bottom:10px;background:'+T.emeraldDim+'22;">'+
+    '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">'+
+    '<div><div style="font-weight:600;">'+req.name+' <span style="font-size:11px;color:'+T.muted+';">'+req.department+'</span></div>'+
+    '<div style="font-size:11px;color:'+T.muted+';">&#128231; '+req.email+'</div></div>'+
+    (req.temp_username?'<div style="text-align:right;"><div style="font-size:11px;color:'+T.muted+';margin-bottom:4px;">Temporary Credentials:</div>'+
+    '<div style="font-family:\'JetBrains Mono\',monospace;font-size:13px;"><span style="color:'+T.emerald+';">User:</span> <strong>'+req.temp_username+'</strong>'+
+    (req.temp_password?' &nbsp; <span style="color:'+T.amber+';">Pass:</span> <strong>'+req.temp_password+'</strong>':'')+'</div></div>':'')+'</div></div>').join('')+'</div>';
+  }
+  if (rejected.length) {
+    html += '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+    '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.muted+';margin-bottom:16px;">&#10060; Rejected ('+rejected.length+')</div>'+
+    rejected.map(req=>'<div style="border:1px solid '+T.border+';border-radius:10px;padding:12px 16px;margin-bottom:8px;opacity:0.6;">'+
+    '<div style="font-weight:600;">'+req.name+'</div><div style="font-size:11px;color:'+T.muted+';">'+req.department+' &middot; '+req.email+'</div></div>').join('')+'</div>';
+  }
+  return html;
+}
+
+// ── Audit Tab ───────────────────────────────────────────────────
+function renderAuditTab() {
+  const logs = DATA.audit;
+  return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';margin-bottom:12px;">&#128272; Immutable Audit Log</div>'+
+  '<div style="font-size:12px;color:'+T.muted+';margin-bottom:16px;padding:10px 14px;background:'+T.surface2+';border-radius:8px;border-left:3px solid '+T.amber+';">Every action is append-only and SHA-256 hashed on the server. Cannot be edited.</div>'+
+  '<div style="max-height:460px;overflow-y:auto;"><table style="width:100%;border-collapse:collapse;"><thead style="position:sticky;top:0;background:'+T.surface+';">'+
+  '<tr style="border-bottom:1px solid '+T.border+';">'+['Timestamp','Employee','Action','Old','New','By','Hash'].map(h=>'<th style="padding:8px 12px;text-align:left;font-size:11px;color:'+T.muted+';font-weight:700;text-transform:uppercase;">'+h+'</th>').join('')+'</tr></thead><tbody>'+
+  logs.map(l=>'<tr style="border-bottom:1px solid '+T.border+'22;">'+
+  '<td style="padding:9px 12px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:'+T.muted+';">'+l.timestamp.replace('T',' ').slice(0,19)+'</td>'+
+  '<td style="padding:9px 12px;font-size:12px;">'+(l.employee_id||'&#8212;')+'</td>'+
+  '<td style="padding:9px 12px;">'+badge(l.action,T.amber,T.amberDim+'33')+'</td>'+
+  '<td style="padding:9px 12px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:'+T.muted+';">'+(l.old_value||'&#8212;')+'</td>'+
+  '<td style="padding:9px 12px;font-family:\'JetBrains Mono\',monospace;font-size:11px;">'+(l.new_value||'&#8212;')+'</td>'+
+  '<td style="padding:9px 12px;font-size:12px;color:'+T.textDim+';">'+(l.performed_by||l.user_id)+'</td>'+
+  '<td style="padding:9px 12px;font-family:\'JetBrains Mono\',monospace;font-size:10px;color:'+T.amber+';">'+(l.hash?.slice(0,12)||'')+'&#8230;</td></tr>').join('')+
+  '</tbody></table></div></div>';
+}
+
+// ── Integrity Tab ───────────────────────────────────────────────
+function renderIntegrityTab() {
+  if (!INTEGRITY_DATA) {
+    return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+    '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';margin-bottom:16px;">&#128737; Cryptographic Integrity Report</div>'+
+    '<div style="text-align:center;padding:40px;color:'+T.muted+';">'+
+    '<div style="font-size:40px;margin-bottom:12px;">&#128269;</div>'+
+    '<div>Click <strong style="color:'+T.amber+';">Verify Integrity</strong> to run SHA-256 check on all attendance records.</div></div></div>';
+  }
+  const tampered = INTEGRITY_DATA.filter(r=>r.tampered);
+  const ok = INTEGRITY_DATA.filter(r=>!r.tampered);
+  return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';margin-bottom:16px;">&#128737; Cryptographic Integrity Report</div>'+
+  '<div style="display:flex;gap:14px;margin-bottom:20px;">'+
+  '<div style="flex:1;background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:16px 20px;border-top:3px solid '+T.emerald+';">'+
+  '<div style="font-size:26px;font-weight:800;color:'+T.emerald+';">'+ok.length+'</div><div style="font-size:11px;color:'+T.muted+';">Records OK</div></div>'+
+  '<div style="flex:1;background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:16px 20px;border-top:3px solid '+T.rose+';">'+
+  '<div style="font-size:26px;font-weight:800;color:'+T.rose+';">'+tampered.length+'</div><div style="font-size:11px;color:'+T.muted+';">Tampered</div></div></div>'+
+  '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr style="border-bottom:1px solid '+T.border+';">'+
+  ['Employee','Date','Status','Duty','Integrity','Hash'].map(h=>'<th style="padding:8px 12px;text-align:left;font-size:11px;color:'+T.muted+';font-weight:700;text-transform:uppercase;">'+h+'</th>').join('')+
+  '</tr></thead><tbody>'+INTEGRITY_DATA.map(({record:r,tampered:isTampered})=>{
+    const emp = DATA.employees.find(e=>e.id===r.employee_id);
+    return '<tr style="border-bottom:1px solid '+T.border+'22;background:'+(isTampered?T.roseDim+'44':'transparent')+';">'+
+    '<td style="padding:10px 12px;">'+r.employee_id+'</td>'+
+    '<td style="padding:10px 12px;font-family:\'JetBrains Mono\',monospace;font-size:12px;">'+r.date+'</td>'+
+    '<td style="padding:10px 12px;">'+statusBadge(r.status)+'</td>'+
+    '<td style="padding:10px 12px;">'+(emp?dutyBadge(emp.duty_type||'OFFICE'):'&#8212;')+'</td>'+
+    '<td style="padding:10px 12px;">'+(isTampered?badge('&#128680; TAMPERED','#FCA5A5','#991B1B'):badge('&#10003; Valid',T.emerald,T.emeraldDim+'55'))+'</td>'+
+    '<td style="padding:10px 12px;font-family:\'JetBrains Mono\',monospace;font-size:10px;color:'+(isTampered?T.rose:T.amber)+'">'+(r.hash?.slice(0,24)||'')+'&#8230;</td></tr>';
+  }).join('')+'</tbody></table></div></div>';
+}
+
+// ════════════════════════════════════════════════════════════════
+//  MANAGER DASHBOARD
+// ════════════════════════════════════════════════════════════════
+function renderManagerDashboard() {
+  const employees = DATA.employees;
+  const todayRecs = DATA.todayRecs;
+  const markedIds = new Set(todayRecs.map(r=>r.employee_id));
+
+  const tabs = [
+    {k:'today',     l:'&#128197; Overview'},
+    {k:'duty',      l:'&#127759; Duty Config'},
+    {k:'audit',     l:'&#128272; Audit Log'},
+    {k:'integrity', l:'&#128737; Integrity'},
+  ];
+
+  let html = '<div style="max-width:1100px;margin:0 auto;padding:28px 24px;" class="fade-in">';
+
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">'+
+  '<div>'+
+  '<h1 style="font-size:22px;font-weight:800;">Technical Manager Dashboard</h1>'+
+  '<div style="color:'+T.muted+';font-size:13px;margin-top:3px;">Configure employee duty types and site coordinates</div>'+
+  '</div>'+
+  '<button id="btn-integrity" style="display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.text+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">&#128269; Verify Integrity</button>'+
+  '</div>';
+
+  // Stat cards
+  const officeCount = employees.filter(e=>(e.duty_type||'OFFICE')==='OFFICE').length;
+  const onsiteCount = employees.filter(e=>e.duty_type==='ON_SITE').length;
+  const travelCount = employees.filter(e=>e.duty_type==='TRAVEL').length;
+  html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px;">'+
+  statCard('Total Employees', employees.length, 'across all duty types', T.violet)+
+  statCard('Office', officeCount, 'HR marks attendance', T.muted)+
+  statCard('On-Site', onsiteCount, 'GPS-verified check-in', T.emerald)+
+  statCard('Traveling', travelCount, 'instant self-mark', T.cyan)+'</div>';
+
+  html += '<div style="display:flex;gap:4px;margin-bottom:20px;background:'+T.surface+';border-radius:10px;padding:4px;border:1px solid '+T.border+';width:fit-content;">'+
+  tabs.map(t=>'<button class="tab-btn" data-tab="'+t.k+'" style="padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;background:'+(CURRENT_TAB===t.k?T.violet:'transparent')+';color:'+(CURRENT_TAB===t.k?'#fff':T.muted)+';">'+t.l+'</button>').join('')+'</div>';
+
+  html += '<div id="tab-content">';
+  if      (CURRENT_TAB==='today')     html += renderManagerOverviewTab(employees, todayRecs, markedIds);
+  else if (CURRENT_TAB==='duty')      html += renderDutyConfigTab(employees);
+  else if (CURRENT_TAB==='audit')     html += renderAuditTab();
+  else if (CURRENT_TAB==='integrity') html += renderIntegrityTab();
+  html += '</div></div>';
+  return html;
+}
+
+// ── Manager Overview Tab ───────────────────────────────────────
+function renderManagerOverviewTab(employees, todayRecs, markedIds) {
+  let rows = employees.map(emp => {
+    const rec = todayRecs.find(r=>r.employee_id===emp.id);
+    return '<tr style="border-bottom:1px solid '+T.border+'22;">'+
+    '<td style="padding:12px 12px;"><div style="font-weight:600;">'+emp.name+'</div><div style="font-size:11px;color:'+T.muted+';">'+emp.id+' &middot; '+emp.department+'</div></td>'+
+    '<td style="padding:12px 12px;">'+dutyBadge(emp.duty_type||'OFFICE')+'</td>'+
+    '<td style="padding:12px 12px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:'+T.muted+';">'+
+    (emp.duty_type==='ON_SITE' && emp.assigned_lat ? emp.assigned_lat.toFixed(4)+', '+emp.assigned_lng.toFixed(4) : '&#8212;')+
+    '</td>'+
+    '<td style="padding:12px 12px;">'+(rec ? statusBadge(rec.status) : '<span style="color:'+T.muted+';font-size:12px;">Not marked</span>')+'</td>'+
+    '</tr>';
+  }).join('');
+
+  return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.violet+';margin-bottom:16px;">Today\'s Attendance Overview</div>'+
+  '<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;"><thead><tr style="border-bottom:1px solid '+T.border+';">'+
+  ['Employee','Duty Type','Assigned Coords','Today\'s Status'].map(h=>'<th style="padding:8px 12px;text-align:left;font-size:11px;color:'+T.muted+';font-weight:700;text-transform:uppercase;">'+h+'</th>').join('')+
+  '</tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+}
+
+// ── Duty Config Tab ─────────────────────────────────────────────
+function renderDutyConfigTab(employees) {
+  if (!employees.length) return '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:40px;text-align:center;color:'+T.muted+';">No employees to configure.</div>';
+
+  let rows = employees.map((emp, idx) => {
+    const duty = emp.duty_type || 'OFFICE';
+    const isOnSite = duty === 'ON_SITE';
+    return '<div style="background:'+T.surface2+';border:1px solid '+T.border+';border-radius:10px;padding:16px 20px;margin-bottom:10px;" id="duty-row-'+emp.id+'">'+
+    '<div style="display:flex;align-items:center;flex-wrap:wrap;gap:12px;">'+
+    // Employee info
+    '<div style="flex:1;min-width:160px;"><div style="font-weight:700;">'+emp.name+'</div>'+
+    '<div style="font-size:11px;color:'+T.muted+';">'+emp.id+' &middot; '+emp.department+'</div></div>'+
+    // Duty type dropdown
+    '<div style="display:flex;flex-direction:column;gap:4px;">'+
+    '<label style="font-size:10px;color:'+T.muted+';text-transform:uppercase;letter-spacing:0.06em;">Duty Type</label>'+
+    '<select class="duty-select duty-dropdown" data-id="'+emp.id+'" style="min-width:130px;">'+
+    ['OFFICE','ON_SITE','TRAVEL'].map(d=>'<option value="'+d+'"'+(duty===d?' selected':'')+'>'+
+    (d==='OFFICE'?'🏢 Office':d==='ON_SITE'?'📍 On-Site':'✈ Traveling')+'</option>').join('')+
+    '</select></div>'+
+    // Lat input
+    '<div class="coord-wrap-'+emp.id+'" style="display:flex;flex-direction:column;gap:4px;">'+
+    '<label style="font-size:10px;color:'+T.muted+';text-transform:uppercase;letter-spacing:0.06em;">Latitude</label>'+
+    '<input class="coord-input lat-input" data-id="'+emp.id+'" type="number" step="0.0001" placeholder="28.6139" value="'+(emp.assigned_lat||'')+'"'+(isOnSite?'':' disabled')+'>'+
+    '</div>'+
+    // Lng input
+    '<div class="coord-wrap-'+emp.id+'" style="display:flex;flex-direction:column;gap:4px;">'+
+    '<label style="font-size:10px;color:'+T.muted+';text-transform:uppercase;letter-spacing:0.06em;">Longitude</label>'+
+    '<input class="coord-input lng-input" data-id="'+emp.id+'" type="number" step="0.0001" placeholder="77.2090" value="'+(emp.assigned_lng||'')+'"'+(isOnSite?'':' disabled')+'>'+
+    '</div>'+
+    // Save button
+    '<button class="btn-save-duty" data-id="'+emp.id+'" style="padding:8px 18px;border-radius:8px;border:1px solid '+T.violet+'55;background:'+T.violetDim+'55;color:#C4B5FD;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;margin-top:14px;">&#128190; Save</button>'+
+    '</div>'+
+    // Info hint for on-site
+    '<div class="onsite-hint-'+emp.id+'" style="margin-top:10px;padding:8px 12px;background:'+T.emeraldDim+'33;border-radius:6px;font-size:11px;color:#6EE7B7;'+(isOnSite?'':'display:none;')+'">'+
+    '&#128205; Enter the exact GPS coordinates of the employee\'s assigned work site. Employees within 100m can check in.</div>'+
+    '</div>';
+  }).join('');
+
+  return '<div>'+
+  '<div style="padding:12px 16px;background:'+T.violetDim+'33;border:1px solid '+T.violet+'44;border-radius:10px;margin-bottom:20px;font-size:13px;color:#C4B5FD;">'+
+  '&#9432; <strong>Duty Configuration</strong>: Set each employee\'s duty type. ON_SITE requires GPS coordinates for server-side verification. Changes take effect immediately.'+
+  '</div>'+
+  rows+'</div>';
+}
+
+// ════════════════════════════════════════════════════════════════
+//  EMPLOYEE DASHBOARD
+// ════════════════════════════════════════════════════════════════
+function renderEmployeeDashboard() {
+  const emp = DATA.myProfile;
+  if (!emp) return '<div style="padding:40px;text-align:center;color:'+T.muted+';">Profile could not be loaded. Please reload.</div>';
+
+  const today    = todayISO();
+  const myRecs   = DATA.attendance;
+  const todayRec = myRecs.find(r=>r.date===today);
+  const salData  = DATA.salary[0] || null;
+  const duty     = emp.duty_type || 'OFFICE';
+
+  const [yr,mo] = SELECTED_MONTH.split('-').map(Number);
+  const daysInMonth = new Date(yr,mo,0).getDate();
+  const firstDow    = new Date(yr,mo-1,1).getDay();
+
+  const calCells = Array(firstDow).fill('<div></div>').concat(
+    Array(daysInMonth).fill(null).map((_,i) => {
+      const day  = String(i+1).padStart(2,'0');
+      const date = SELECTED_MONTH+'-'+day;
+      const rec  = myRecs.find(r=>r.date===date);
+      const isT  = date===today;
+      let bg=T.surface2, bdr=T.border, lbl='', lc=T.muted;
+      if (rec) {
+        if (rec.status==='PRESENT')    { bg=T.emeraldDim+'88'; bdr=T.emerald; lc=T.emerald; lbl='&#10003;'; }
+        if (rec.status==='ABSENT_LOP') { bg=T.roseDim+'88';    bdr=T.rose;    lc=T.rose;    lbl='L'; }
+        if (rec.status==='ABSENT_PL')  { bg='#4C1D9588';       bdr='#A78BFA'; lc='#A78BFA'; lbl='P'; }
+        if (rec.status==='ABSENT_EL')  { bg=T.blueDim+'88';    bdr=T.blue;    lc=T.blue;    lbl='E'; }
+        if (rec.status==='TRAVEL')     { bg=T.cyanDim+'88';    bdr=T.cyan;    lc=T.cyan;    lbl='&#10003;'; }
+      }
+      return '<div style="background:'+bg+';border:1px solid '+(isT?T.amber:bdr)+';border-radius:6px;padding:6px 4px;text-align:center;min-height:44px;'+(isT?'box-shadow:0 0 0 2px '+T.amber+'44;':'')+'">'+
+      '<div style="font-size:12px;font-weight:'+(isT?800:500)+';color:'+(isT?T.amber:T.text)+'">'+(i+1)+'</div>'+
+      (lbl?'<div style="font-size:14px;font-weight:800;color:'+lc+';">'+lbl+'</div>':'')+'</div>';
+    })
+  );
+
+  const summaryItems = salData ? [
+    {l:'Present Days',  v:salData.present_days,         a:T.emerald},
+    {l:'Travel Days',   v:(salData.travel_days||0),     a:T.cyan},
+    {l:'LOP Days',      v:salData.lop_days,             a:salData.lop_days?T.rose:T.muted},
+    {l:'PL Used',       v:salData.pl_days,              a:'#A78BFA'},
+    {l:'EL Used',       v:salData.el_days,              a:T.blue},
+    {l:'Net Payable',   v:'&#8377;'+salData.payable.toLocaleString(), a:T.amber},
+  ] : [];
+
+  // ── Duty Check-In Panel ──────────────────────────────────────
+  let dutyPanel = '';
+  if (todayRec) {
+    // Already marked
+    dutyPanel = '<div style="background:'+T.emeraldDim+'44;border:1px solid '+T.emerald+';border-radius:12px;padding:16px 20px;margin-bottom:16px;display:flex;align-items:center;gap:14px;">'+
+    '<span style="font-size:28px;">&#128274;</span>'+
+    '<div><div style="font-weight:700;color:'+T.emerald+';">Attendance Recorded</div>'+
+    '<div style="font-size:13px;color:'+T.textDim+';margin-top:3px;">Status: '+statusBadge(todayRec.status)+' &nbsp; at '+todayRec.marked_at.slice(11,16)+' UTC</div>'+
+    '<div style="font-size:11px;color:'+T.muted+';margin-top:6px;font-family:\'JetBrains Mono\',monospace;">Hash: '+todayRec.hash?.slice(0,20)+'&#8230;</div></div></div>';
+
+  } else if (duty === 'OFFICE') {
+    dutyPanel = '<div class="gps-banner" style="background:'+T.surface2+';border:1px solid '+T.border+';margin-bottom:16px;">'+
+    '<div style="display:flex;align-items:center;gap:12px;">'+
+    '<span style="font-size:28px;">🏢</span>'+
+    '<div>'+
+    '<div style="font-weight:700;font-size:15px;color:'+T.text+';">Office Duty Active</div>'+
+    '<div style="font-size:13px;color:'+T.textDim+';margin-top:3px;">HR will log your attendance manually. No action needed from your side.</div>'+
+    '</div></div></div>';
+
+  } else if (duty === 'TRAVEL') {
+    dutyPanel = '<div class="gps-banner" style="background:'+T.cyanDim+'44;border:1px solid '+T.cyan+';margin-bottom:16px;">'+
+    '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;">'+
+    '<div style="display:flex;align-items:center;gap:12px;">'+
+    '<span style="font-size:28px;">✈️</span>'+
+    '<div>'+
+    '<div style="font-weight:700;font-size:15px;color:#67E8F9;">On-Duty / Traveling</div>'+
+    '<div style="font-size:13px;color:'+T.textDim+';margin-top:3px;">You are on travel duty. No GPS check required — instant on-duty mark.</div>'+
+    '</div></div>'+
+    '<button id="btn-travel-checkin" class="btn-checkin" style="background:'+T.cyan+';color:#083344;font-size:14px;">'+
+    '✈ Check-In (In-Transit)</button>'+
+    '</div></div>';
+
+  } else if (duty === 'ON_SITE') {
+    dutyPanel = '<div class="gps-banner" style="background:'+T.emeraldDim+'44;border:1px solid '+T.emerald+';margin-bottom:16px;">'+
+    '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;">'+
+    '<div style="display:flex;align-items:center;gap:12px;">'+
+    '<span style="font-size:28px;">📍</span>'+
+    '<div>'+
+    '<div style="font-weight:700;font-size:15px;color:'+T.emerald+';">On-Site Duty Active</div>'+
+    '<div style="font-size:13px;color:'+T.textDim+';margin-top:3px;">GPS verification required. Must be within <strong>100 metres</strong> of your assigned site.</div>'+
+    '</div></div>'+
+    '<button id="btn-gps-checkin" class="btn-checkin" style="background:'+T.emerald+';color:#022c22;font-size:14px;">'+
+    '📍 Mark My Attendance (GPS)</button>'+
+    '</div>'+
+    '<div id="gps-status" style="margin-top:12px;font-size:12px;color:'+T.textDim+';display:none;"></div>'+
+    '</div>';
+  }
+
+  return '<div style="max-width:860px;margin:0 auto;padding:28px 24px;" class="fade-in">'+
+  // Profile card
+  '<div style="background:linear-gradient(135deg,'+T.surface+','+T.surface2+');border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;margin-bottom:16px;border-top:3px solid '+(duty==='TRAVEL'?T.cyan:duty==='ON_SITE'?T.emerald:T.amber)+';">'+
+  '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">'+
+  '<div><div style="font-size:20px;font-weight:800;">'+emp.name+'</div>'+
+  '<div style="color:'+T.muted+';font-size:13px;margin-top:2px;">'+emp.department+' &middot; '+emp.id+' &middot; Joined '+emp.join_date+'</div>'+
+  '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">'+dutyBadge(duty)+badge('PL: '+emp.pl_balance,'#A78BFA','#4C1D9555')+badge('EL: '+emp.el_balance,T.blue,T.blueDim+'55')+
+  (todayRec?statusBadge(todayRec.status):badge('Today: Not marked',T.muted,T.border))+'</div></div>'+
+  '<div style="text-align:right;"><div style="font-size:11px;color:'+T.muted+';text-transform:uppercase;letter-spacing:0.07em;">Monthly Salary</div>'+
+  '<div style="font-size:30px;font-weight:800;color:'+T.amber+';">&#8377;'+emp.monthly_salary.toLocaleString()+'</div></div></div></div>'+
+
+  // Change creds button
+  '<div style="margin-bottom:16px;"><button id="btn-change-creds" style="display:inline-flex;align-items:center;gap:8px;padding:9px 20px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface+';color:'+T.textDim+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">&#128273; Change Username / Password</button></div>'+
+
+  // Duty check-in panel
+  dutyPanel +
+
+  // Monthly summary
+  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">'+
+  '<div style="font-weight:700;font-size:15px;">Monthly Summary</div>'+
+  '<input type="month" id="month-picker" value="'+SELECTED_MONTH+'" style="background:'+T.surface2+';border:1px solid '+T.border+';border-radius:8px;padding:6px 12px;color:'+T.text+';font-size:13px;outline:none;font-family:inherit;"></div>'+
+  (summaryItems.length ? '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px;">'+
+  summaryItems.map(item=>'<div style="background:'+T.surface+';border:1px solid '+T.border+';border-top:3px solid '+item.a+';border-radius:10px;padding:12px 14px;">'+
+  '<div style="font-size:10px;color:'+T.muted+';text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;">'+item.l+'</div>'+
+  '<div style="font-weight:800;font-size:17px;color:'+item.a+';">'+item.v+'</div></div>').join('')+'</div>' : '')+
+
+  // Calendar
+  '<div style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:12px;padding:20px 24px;">'+
+  '<div style="font-size:13px;font-weight:600;text-transform:uppercase;color:'+T.amber+';margin-bottom:16px;">Attendance Calendar &#8212; '+SELECTED_MONTH+'</div>'+
+  '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:6px;">'+
+  ['Su','Mo','Tu','We','Th','Fr','Sa'].map(d=>'<div style="text-align:center;font-size:11px;color:'+T.muted+';font-weight:700;padding:4px 0;">'+d+'</div>').join('')+'</div>'+
+  '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">'+calCells.join('')+'</div>'+
+  '<div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;padding-top:12px;border-top:1px solid '+T.border+';">'+
+  [{l:'Present',c:T.emerald},{l:'Travel ✈',c:T.cyan},{l:'PL (P)',c:'#A78BFA'},{l:'EL (E)',c:T.blue},{l:'LOP (L)',c:T.rose},{l:'Today',c:T.amber}]
+  .map(item=>'<div style="display:flex;align-items:center;gap:6px;"><div style="width:12px;height:12px;border-radius:3px;background:'+item.c+'55;border:2px solid '+item.c+';"></div><span style="font-size:11px;color:'+T.muted+';">'+item.l+'</span></div>').join('')+
+  '</div></div></div>';
+}
+
+// ════════════════════════════════════════════════════════════════
+//  MODALS
+// ════════════════════════════════════════════════════════════════
+function showLeaveModal(empId, empName) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:999;';
+  const opts = [
+    {v:'ABSENT_PL',l:'Paid Leave (PL)',d:'Deducted from PL balance'},
+    {v:'ABSENT_EL',l:'Earned Leave (EL)',d:'Deducted from EL balance'},
+    {v:'ABSENT_LOP',l:'Unpaid Leave (Loss of Pay)',d:'Salary deduction applies'},
+  ];
+  overlay.innerHTML = '<div class="slide-in" style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:14px;padding:28px;width:360px;box-shadow:0 24px 64px #0008;">'+
+  '<div style="font-size:15px;font-weight:700;margin-bottom:6px;">Mark Absent &#8212; '+empName+'</div>'+
+  '<div style="font-size:13px;color:'+T.muted+';margin-bottom:20px;">Choose absence type. Cannot be changed later.</div>'+
+  opts.map((opt,i)=>'<label id="lbl-'+opt.v+'" style="display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:8px;margin-bottom:8px;border:1px solid '+(i===2?T.amber:T.border)+';background:'+(i===2?T.amberDim+'22':T.surface2)+';cursor:pointer;">'+
+  '<input type="radio" name="leaveType" value="'+opt.v+'" '+(i===2?'checked':'')+' style="margin-top:2px;accent-color:'+T.amber+';">'+
+  '<div><div style="font-weight:600;font-size:13px;">'+opt.l+'</div><div style="font-size:11px;color:'+T.muted+';">'+opt.d+'</div></div></label>').join('')+
+  '<div style="display:flex;gap:10px;margin-top:20px;">'+
+  '<button id="modal-cancel" style="flex:1;padding:9px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.textDim+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Cancel</button>'+
+  '<button id="modal-confirm" style="flex:1;padding:9px;border-radius:8px;border:none;background:'+T.rose+';color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Confirm Absence</button></div></div>';
+  document.body.appendChild(overlay);
+  overlay.querySelectorAll('input[name="leaveType"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      overlay.querySelectorAll('label[id^="lbl-"]').forEach(l=>{l.style.border='1px solid '+T.border;l.style.background=T.surface2;});
+      const al=overlay.querySelector('#lbl-'+radio.value);
+      if(al){al.style.border='1px solid '+T.amber;al.style.background=T.amberDim+'22';}
+    });
+  });
+  document.getElementById('modal-cancel').onclick = () => overlay.remove();
+  document.getElementById('modal-confirm').onclick = async () => {
+    const type = overlay.querySelector('input[name="leaveType"]:checked')?.value || 'ABSENT_LOP';
+    const btn = document.getElementById('modal-confirm');
+    btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+    try {
+      await POST('/attendance/mark', { employee_id:empId, status:type });
+      overlay.remove();
+      showToast(empName+' marked '+{ABSENT_PL:'PL',ABSENT_EL:'EL',ABSENT_LOP:'LOP'}[type]+' ✓');
+      await render();
+    } catch(e) { overlay.remove(); showToast(e.message||'Error marking attendance','error'); }
+  };
+}
+
+function showEditEmployeeModal(empId) {
+  const emp = DATA.employees.find(e=>e.id===empId);
+  if (!emp) return;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:999;padding:20px;';
+  overlay.innerHTML = '<div class="slide-in" style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:14px;padding:28px;width:440px;max-width:100%;box-shadow:0 24px 64px #0008;max-height:90vh;overflow-y:auto;">'+
+  '<div style="font-size:16px;font-weight:800;margin-bottom:4px;">&#9998; Edit &#8212; '+emp.name+'</div>'+
+  '<div style="font-size:12px;color:'+T.muted+';margin-bottom:20px;">'+emp.id+' &middot; '+emp.department+'</div>'+
+  '<div style="display:grid;gap:14px;">'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Monthly Salary (&#8377;)</label>'+
+  '<input id="edit-salary" type="number" value="'+emp.monthly_salary+'" style="'+IS()+'"></div>'+
+  '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">PL Balance</label><input id="edit-pl" type="number" value="'+emp.pl_balance+'" min="0" style="'+IS()+'"></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">EL Balance</label><input id="edit-el" type="number" value="'+emp.el_balance+'" min="0" style="'+IS()+'"></div></div>'+
+  '<div style="border-top:1px solid '+T.border+';padding-top:14px;">'+
+  '<div style="font-size:12px;font-weight:700;color:'+T.amber+';margin-bottom:10px;">&#128273; Login Credentials</div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Username</label><input id="edit-username" value="'+(emp.username||'')+'" style="'+IS()+'"></div>'+
+  '<div style="margin-top:10px;"><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">New Password (leave blank = no change)</label>'+
+  '<input id="edit-password" type="password" placeholder="New password" style="'+IS()+'"></div></div></div>'+
+  '<div id="edit-error" class="hidden" style="margin-top:14px;padding:10px;border-radius:8px;background:'+T.roseDim+'66;border:1px solid '+T.rose+';color:#FCA5A5;font-size:13px;"></div>'+
+  '<div style="display:flex;gap:10px;margin-top:20px;">'+
+  '<button id="edit-cancel" style="flex:1;padding:10px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.textDim+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Cancel</button>'+
+  '<button id="edit-save" style="flex:1;padding:10px;border-radius:8px;border:none;background:'+T.amber+';color:#000;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">&#128190; Save Changes</button></div></div>';
+  document.body.appendChild(overlay);
+  document.getElementById('edit-cancel').onclick = () => overlay.remove();
+  document.getElementById('edit-save').onclick = async () => {
+    const salary=parseInt(document.getElementById('edit-salary').value);
+    const pl=parseInt(document.getElementById('edit-pl').value);
+    const el=parseInt(document.getElementById('edit-el').value);
+    const username=document.getElementById('edit-username').value.trim();
+    const password=document.getElementById('edit-password').value;
+    const errEl=document.getElementById('edit-error'), btn=document.getElementById('edit-save');
+    if (!salary||salary<0||isNaN(pl)||isNaN(el)||!username) { errEl.textContent='All fields are required.'; errEl.classList.remove('hidden'); return; }
+    btn.innerHTML='<span class="spinner"></span> Saving...'; btn.disabled=true;
+    try {
+      await PUT('/employees/'+empId, { monthly_salary:salary, pl_balance:pl, el_balance:el, username, new_password:password||null });
+      overlay.remove(); showToast(emp.name+' updated ✓'); await render();
+    } catch(e) { errEl.textContent=e.message||'Could not save.'; errEl.classList.remove('hidden'); btn.innerHTML='&#128190; Save Changes'; btn.disabled=false; }
+  };
+}
+
+function showDeleteModal(empId, empName) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:999;padding:20px;';
+  overlay.innerHTML = '<div class="slide-in" style="background:'+T.surface+';border:1px solid '+T.rose+';border-radius:14px;padding:28px;width:380px;max-width:100%;box-shadow:0 24px 64px #0008;text-align:center;">'+
+  '<div style="font-size:40px;margin-bottom:16px;">&#9888;&#65039;</div>'+
+  '<div style="font-size:16px;font-weight:800;margin-bottom:8px;">Delete Employee?</div>'+
+  '<div style="font-size:13px;color:'+T.muted+';margin-bottom:20px;"><strong style="color:'+T.rose+';">'+empName+'</strong> will be permanently deleted.<br>Attendance data and account will also be removed.<br><strong>This cannot be undone.</strong></div>'+
+  '<div style="display:flex;gap:10px;">'+
+  '<button id="del-cancel" style="flex:1;padding:10px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.textDim+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Cancel</button>'+
+  '<button id="del-confirm" style="flex:1;padding:10px;border-radius:8px;border:none;background:'+T.rose+';color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">&#128465; Yes, Delete</button></div></div>';
+  document.body.appendChild(overlay);
+  document.getElementById('del-cancel').onclick = () => overlay.remove();
+  document.getElementById('del-confirm').onclick = async () => {
+    const btn=document.getElementById('del-confirm');
+    btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+    try {
+      await DELETE('/employees/'+empId); overlay.remove(); showToast(empName+' deleted ✓'); await render();
+    } catch(e) { overlay.remove(); showToast(e.message||'Could not delete.','error'); }
+  };
+}
+
+function showChangeCredsModal() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:999;padding:20px;';
+  overlay.innerHTML = '<div class="slide-in" style="background:'+T.surface+';border:1px solid '+T.border+';border-radius:14px;padding:28px;width:400px;max-width:100%;box-shadow:0 24px 64px #0008;">'+
+  '<div style="font-size:16px;font-weight:800;margin-bottom:4px;">&#128273; Change Login Details</div>'+
+  '<div style="font-size:12px;color:'+T.muted+';margin-bottom:20px;">Set a new username and password</div>'+
+  '<div style="display:grid;gap:14px;">'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">New Username</label><input id="cc-username" placeholder="New username" style="'+IS()+'"></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">New Password</label><input id="cc-password" type="password" placeholder="Min 6 characters" style="'+IS()+'"></div>'+
+  '<div><label style="display:block;font-size:12px;font-weight:600;color:'+T.textDim+';margin-bottom:5px;">Confirm Password</label><input id="cc-confirm" type="password" placeholder="Repeat password" style="'+IS()+'"></div></div>'+
+  '<div id="cc-error" class="hidden" style="margin-top:14px;padding:10px;border-radius:8px;background:'+T.roseDim+'66;border:1px solid '+T.rose+';color:#FCA5A5;font-size:13px;"></div>'+
+  '<div style="display:flex;gap:10px;margin-top:20px;">'+
+  '<button id="cc-cancel" style="flex:1;padding:10px;border-radius:8px;border:1px solid '+T.border+';background:'+T.surface2+';color:'+T.textDim+';font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Cancel</button>'+
+  '<button id="cc-save" style="flex:1;padding:10px;border-radius:8px;border:none;background:'+T.amber+';color:#000;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">Save</button></div></div>';
+  document.body.appendChild(overlay);
+  document.getElementById('cc-cancel').onclick = () => overlay.remove();
+  document.getElementById('cc-save').onclick = async () => {
+    const username=document.getElementById('cc-username').value.trim();
+    const password=document.getElementById('cc-password').value;
+    const confirm=document.getElementById('cc-confirm').value;
+    const errEl=document.getElementById('cc-error'), btn=document.getElementById('cc-save');
+    if (!username) { errEl.textContent='Username is required.'; errEl.classList.remove('hidden'); return; }
+    if (password.length<6) { errEl.textContent='Password must be at least 6 characters.'; errEl.classList.remove('hidden'); return; }
+    if (password!==confirm) { errEl.textContent='Passwords do not match.'; errEl.classList.remove('hidden'); return; }
+    btn.innerHTML='<span class="spinner"></span> Saving...'; btn.disabled=true;
+    try {
+      await POST('/auth/change-credentials', { new_username:username, new_password:password });
+      SESSION.username=username; overlay.remove(); showToast('Credentials updated ✓'); await render();
+    } catch(e) { errEl.textContent=e.message||'Could not save.'; errEl.classList.remove('hidden'); btn.innerHTML='Save'; btn.disabled=false; }
+  };
+}
+
+// ════════════════════════════════════════════════════════════════
+//  EVENT BINDING
+// ════════════════════════════════════════════════════════════════
+function bindAppEvents() {
+  // Logout
+  const logoutBtn = document.getElementById('btn-logout');
+  if (logoutBtn) logoutBtn.onclick = async () => {
+    try { await POST('/auth/logout'); } catch(_) {}
+    AUTH_TOKEN=null; sessionStorage.removeItem('ta_token'); sessionStorage.removeItem('ta_user');
+    SESSION=null; DATA={employees:[],attendance:[],todayRecs:[],salary:[],audit:[],requests:[],myProfile:null};
+    render();
+  };
+
+  // Tabs
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.onclick = () => { CURRENT_TAB = btn.dataset.tab; render(); };
+  });
+
+  // Integrity verify
+  const intBtn = document.getElementById('btn-integrity');
+  if (intBtn) intBtn.onclick = async () => {
+    intBtn.innerHTML='<span class="spinner"></span> Checking...'; intBtn.disabled=true;
+    try {
+      const data = await GET('/attendance/integrity');
+      if (data) INTEGRITY_DATA = data;
+      CURRENT_TAB = 'integrity';
+      await render();
+    } catch(e) { showToast('Integrity check failed: '+e.message,'error'); intBtn.innerHTML='&#128269; Verify Integrity'; intBtn.disabled=false; }
+  };
+
+  // Month picker
+  const mp = document.getElementById('month-picker');
+  if (mp) mp.onchange = async e => { SELECTED_MONTH = e.target.value; await render(); };
+
+  // ── Admin events ────────────────────────────────────────────
+
+  // Present buttons (only for OFFICE employees)
+  document.querySelectorAll('.btn-present').forEach(btn => {
+    btn.onclick = async () => {
+      btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+      try {
+        await POST('/attendance/mark', { employee_id:btn.dataset.id, status:'PRESENT' });
+        showToast(btn.dataset.name+' marked Present ✓'); await render();
+      } catch(e) { showToast(e.message||'Error','error'); btn.innerHTML='&#10003; Present'; btn.disabled=false; }
+    };
+  });
+
+  document.querySelectorAll('.btn-absent').forEach(btn => {
+    btn.onclick = () => showLeaveModal(btn.dataset.id, btn.dataset.name);
+  });
+
+  document.querySelectorAll('.btn-edit-emp, .btn-edit-emp-salary').forEach(btn => {
+    btn.onclick = () => showEditEmployeeModal(btn.dataset.id);
+  });
+
+  document.querySelectorAll('.btn-delete-emp').forEach(btn => {
+    btn.onclick = () => showDeleteModal(btn.dataset.id, btn.dataset.name);
+  });
+
+  document.querySelectorAll('.btn-approve-req').forEach(btn => {
+    btn.onclick = async () => {
+      btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+      try {
+        const data = await POST('/candidates/'+btn.dataset.id+'/approve');
+        if (!data) { btn.innerHTML='&#10003; Approve'; btn.disabled=false; return; }
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:999;padding:20px;';
+        overlay.innerHTML = '<div class="slide-in" style="background:'+T.surface+';border:1px solid '+T.emerald+';border-radius:14px;padding:28px;width:420px;max-width:100%;box-shadow:0 24px 64px #0008;text-align:center;">'+
+        '<div style="font-size:48px;margin-bottom:12px;">&#127881;</div>'+
+        '<div style="font-size:17px;font-weight:800;margin-bottom:6px;">Account Ready!</div>'+
+        '<div style="font-size:12px;color:'+T.muted+';margin-bottom:20px;">Temporary credentials — share with employee</div>'+
+        '<div style="background:'+T.surface2+';border:1px solid '+T.border+';border-radius:10px;padding:16px 20px;margin-bottom:16px;text-align:left;">'+
+        '<div style="margin-bottom:8px;"><div style="font-size:11px;color:'+T.muted+';margin-bottom:3px;">USERNAME</div>'+
+        '<div style="font-size:18px;font-weight:800;font-family:\'JetBrains Mono\',monospace;color:'+T.emerald+';">'+data.temp_username+'</div></div>'+
+        '<div><div style="font-size:11px;color:'+T.muted+';margin-bottom:3px;">TEMPORARY PASSWORD</div>'+
+        '<div style="font-size:18px;font-weight:800;font-family:\'JetBrains Mono\',monospace;color:'+T.amber+';">'+data.temp_password+'</div></div></div>'+
+        '<div style="font-size:11px;color:'+T.muted+';margin-bottom:16px;">&#9888;&#65039; Remember to update salary and configure duty type (via Technical Manager)</div>'+
+        '<button id="cred-ok" style="width:100%;padding:10px;border-radius:8px;border:none;background:'+T.amber+';color:#000;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Got It &#10003;</button></div>';
+        document.body.appendChild(overlay);
+        document.getElementById('cred-ok').onclick = async () => { overlay.remove(); await render(); };
+      } catch(e) { showToast(e.message||'Could not approve.','error'); await render(); }
+    };
+  });
+
+  document.querySelectorAll('.btn-reject-req').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Reject this request?')) return;
+      btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+      try {
+        await POST('/candidates/'+btn.dataset.id+'/reject');
+        showToast('Request rejected.'); await render();
+      } catch(e) { showToast(e.message||'Error','error'); await render(); }
+    };
+  });
+
+  // ── Manager events — duty config ────────────────────────────
+
+  // Duty dropdown changes — enable/disable coord inputs + show hint
+  document.querySelectorAll('.duty-dropdown').forEach(sel => {
+    sel.onchange = () => {
+      const empId = sel.dataset.id;
+      const duty  = sel.value;
+      const isOnSite = duty === 'ON_SITE';
+      const row = document.getElementById('duty-row-'+empId);
+      if (row) {
+        row.querySelectorAll('.lat-input, .lng-input').forEach(inp => {
+          inp.disabled = !isOnSite;
+          if (!isOnSite) inp.value = '';
+        });
+        const hint = row.querySelector('.onsite-hint-'+empId);
+        if (hint) hint.style.display = isOnSite ? 'block' : 'none';
+      }
+    };
+  });
+
+  // Save duty assignment
+  document.querySelectorAll('.btn-save-duty').forEach(btn => {
+    btn.onclick = async () => {
+      const empId = btn.dataset.id;
+      const row = document.getElementById('duty-row-'+empId);
+      const duty = row.querySelector('.duty-dropdown').value;
+      const latEl = row.querySelector('.lat-input');
+      const lngEl = row.querySelector('.lng-input');
+      const lat = latEl && latEl.value ? parseFloat(latEl.value) : null;
+      const lng = lngEl && lngEl.value ? parseFloat(lngEl.value) : null;
+
+      btn.innerHTML='<span class="spinner"></span>'; btn.disabled=true;
+      try {
+        await PUT('/employees/'+empId+'/duty-config', {
+          duty_type: duty,
+          assigned_lat: lat,
+          assigned_lng: lng,
+        });
+        // Update local data
+        const emp = DATA.employees.find(e=>e.id===empId);
+        if (emp) { emp.duty_type=duty; emp.assigned_lat=lat; emp.assigned_lng=lng; }
+        const empName = emp ? emp.name : empId;
+        showToast(empName+' duty config saved ✓');
+        btn.innerHTML='&#128190; Save';
+        // Flash the row
+        row.style.borderColor = T.violet;
+        setTimeout(() => { if(row) row.style.borderColor = T.border; }, 2000);
+      } catch(e) {
+        showToast(e.message||'Could not save duty config.','error');
+      }
+      btn.disabled=false;
+    };
+  });
+
+  // ── Employee events ─────────────────────────────────────────
+
+  const ccBtn = document.getElementById('btn-change-creds');
+  if (ccBtn) ccBtn.onclick = () => showChangeCredsModal();
+
+  // Travel check-in
+  const travelBtn = document.getElementById('btn-travel-checkin');
+  if (travelBtn) {
+    travelBtn.onclick = async () => {
+      travelBtn.innerHTML='<span class="spinner"></span> Logging...'; travelBtn.disabled=true;
+      try {
+        const data = await POST('/attendance/self-mark', {});
+        showToast('✈ Travel check-in recorded! '+data.message);
+        await render();
+      } catch(e) {
+        showToast(e.message||'Check-in failed.','error');
+        travelBtn.innerHTML='✈ Check-In (In-Transit)'; travelBtn.disabled=false;
+      }
+    };
+  }
+
+  // GPS / On-Site check-in
+  const gpsBtn = document.getElementById('btn-gps-checkin');
+  if (gpsBtn) {
+    gpsBtn.onclick = () => {
+      const statusEl = document.getElementById('gps-status');
+      if (!navigator.geolocation) {
+        showToast('Geolocation is not supported by your browser.', 'error');
+        return;
+      }
+      gpsBtn.innerHTML='<span class="spinner"></span> Getting location...'; gpsBtn.disabled=true;
+      if (statusEl) { statusEl.style.display='block'; statusEl.textContent='📡 Acquiring GPS coordinates...'; }
+
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const lat = position.coords.latitude;
+          const lng = position.coords.longitude;
+          const acc = position.coords.accuracy;
+          if (statusEl) statusEl.textContent = '📍 Location acquired (±'+acc.toFixed(0)+'m accuracy). Verifying with server...';
+
+          try {
+            const data = await POST('/attendance/self-mark', { current_lat:lat, current_lng:lng });
+            showToast('✅ GPS check-in successful! '+data.message);
+            await render();
+          } catch(e) {
+            const msg = e.message || 'GPS check-in failed.';
+            if (statusEl) { statusEl.style.display='block'; statusEl.style.color='#FCA5A5'; statusEl.textContent='❌ '+msg; }
+            showToast(msg, 'error');
+            gpsBtn.innerHTML='📍 Mark My Attendance (GPS)'; gpsBtn.disabled=false;
+          }
+        },
+        (err) => {
+          const msgs = {
+            1: 'Location permission denied. Please allow location access in browser settings.',
+            2: 'Location unavailable. Please try again.',
+            3: 'Location request timed out. Please try again.',
+          };
+          const msg = msgs[err.code] || 'Could not get location.';
+          showToast(msg, 'error');
+          if (statusEl) { statusEl.style.display='block'; statusEl.style.color='#FCA5A5'; statusEl.textContent='❌ '+msg; }
+          gpsBtn.innerHTML='📍 Mark My Attendance (GPS)'; gpsBtn.disabled=false;
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    };
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  BOOT
+// ════════════════════════════════════════════════════════════════
+(async function boot() {
+  if (AUTH_TOKEN) {
+    try {
+      const storedUser = sessionStorage.getItem('ta_user');
+      if (storedUser) {
+        SESSION = JSON.parse(storedUser);
+        // Validate token is still alive
+        const emps = await GET('/employees');
+        if (emps !== null) { await render(); return; }
+      }
+    } catch(_) {}
+    AUTH_TOKEN=null; sessionStorage.removeItem('ta_token'); sessionStorage.removeItem('ta_user');
+  }
+  render();
+})();
+</script>
+</body>
+</html>
