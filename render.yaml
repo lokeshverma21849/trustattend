@@ -1,0 +1,54 @@
+# render.yaml â€” Render.com deployment blueprint
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Place this file in the ROOT of your GitHub/GitLab repo.
+# Then on Render: New â†’ Blueprint â†’ connect your repo.
+# Render will auto-configure everything below.
+#
+# Free tier note:
+#   The free "Web Service" spins down after 15 min of inactivity.
+#   First request after sleep takes ~30s (cold start). This is normal.
+#   Upgrade to "Starter" ($7/mo) to keep it always-on.
+
+services:
+  - type: web
+    name: trustattend-api
+    runtime: python
+    region: singapore      # closest to India â€” change to: oregon, frankfurt, ohio
+    plan: free             # change to: starter  for always-on + persistent disk
+
+    # â”€â”€ Build â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    buildCommand: pip install -r requirements.txt
+
+    # â”€â”€ Start â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Render injects $PORT automatically. Do NOT hardcode a port here.
+    startCommand: uvicorn trustattend_backend:app --host 0.0.0.0 --port $PORT --workers 1
+
+    # â”€â”€ Health check (Render pings this to confirm app is up) â”€â”€
+    healthCheckPath: /health
+
+    # â”€â”€ Environment Variables â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Set these on the Render dashboard (Environment tab) instead of here
+    # so secrets are not committed to Git.
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true      # Render auto-generates a secure random value âœ“
+
+      - key: ALLOWED_ORIGIN
+        value: "*"               # Change to your frontend URL after deploying frontend
+                                 # e.g.: https://trustattend.onrender.com
+
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+
+      # DB_PATH is intentionally NOT set here.
+      # On free tier: SQLite lives in the working directory (ephemeral â€” resets on deploy).
+      # On paid tier with Disk: uncomment the disk section below and set:
+      #   key: DB_PATH
+      #   value: /data/trustattend.db
+
+    # â”€â”€ Persistent Disk (paid plans only â€” $1/mo for 1GB) â”€â”€
+    # Uncomment this block if you upgrade from free to starter plan:
+    # disk:
+    #   name: trustattend-db
+    #   mountPath: /data
+    #   sizeGB: 1
